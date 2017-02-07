@@ -17,7 +17,6 @@ LOCK_DIR="$TMP_DIR/lock"  # Use a lock directory for atomic locks. See the Bash 
 # Default settings
 SLOW_SYNC_TIME=10
 SLOW_SYNC_FILE="$TMP_DIR/slow"
-RSYNC_RSH="ssh -q"
 
 # Load config file
 [ -f "$CFG_FILE" ] && . "$CFG_FILE"
@@ -32,15 +31,7 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Decide on runner (ssh / bash -c)
-if [ "$REMOTE_HOST" != "localhost" ]; then
-  REMOTE_RUNNER="$RSYNC_RSH $REMOTE_HOST"
-  REMOTE="$REMOTE_HOST:$REMOTE_PATH"
-else
-  REMOTE_RUNNER="bash -c"
-  REMOTE="$REMOTE_PATH"
-fi
-
+REMOTE="$REMOTE_HOST:$REMOTE_PATH"
 REMOTE_TMP_DIR="$REMOTE_PATH/$DOT_DIR/tmp"
 
 # Don't sync user excluded files
@@ -63,8 +54,6 @@ USER_RULES="$user_filter $user_include $user_exclude"
 
 TIMESTAMP=$(date "+%Y-%m-%d.%H%M%S")
 
-export RSYNC_RSH
-
 function init {
   if [[ $# -lt 2 ]]; then
     echo "usage: bitpocket init {<REMOTE_HOST>|localhost} <REMOTE_PATH> [overwrite]"
@@ -84,12 +73,6 @@ function init {
 ## Host and path of central storage
 REMOTE_HOST=$1
 REMOTE_PATH="$2"
-
-## SSH command with options for connecting to \$REMOTE
-# RSYNC_RSH="ssh -p 22 -i $DOT_DIR/id_rsa"
-
-## Uncomment following line to follow symlinks (transform it into referent file/dir)
-# RSYNC_OPTS="-L"
 
 ## Uncomment following lines to get sync notifications
 # SLOW_SYNC_TIME=10
@@ -126,8 +109,8 @@ function pull() {
   # copies of any local files to be deleted or overwritten.
   # Order of includes/excludes/filters is EXTREMELY important
   cat "$TMP_DIR/local-add-del" \
-  | rsync --dry-run \
-        -auzxi --delete --exclude "/$DOT_DIR" --exclude-from=- \
+  | rclone sync --dry-run \
+        --delete-before --exclude "/$DOT_DIR" --exclude-from=- \
         $USER_RULES $REMOTE/ . \
   | while read line; do
     if [[ "$line" =~ ^[ch\<\>][fd]|^\*deleting ]]; then
@@ -156,7 +139,7 @@ function pull() {
       fi
     fi
   done \
-  | rsync --files-from=- --from0 -auzxi $RSYNC_OPTS $USER_RULES \
+  | rclone sync --files-from=- $RSYNC_OPTS $USER_RULES \
         $REMOTE/ . \
   | sed "s/^/  | /" || die "PULL"
 
@@ -183,14 +166,13 @@ function push() {
   exec 4> >(sort > "$TMP_DIR/push-delete")
 
   cat "$TMP_DIR/remote-del" \
-      | rsync --dry-run -auzxi --delete $RSYNC_OPTS --exclude "/$DOT_DIR" \
+      | rclone sync --dry-run --delete $RSYNC_OPTS --exclude "/$DOT_DIR" \
       --exclude-from - $USER_RULES . $REMOTE/ \
       | while read line; do
       if [[ "$line" =~ ^[ch\<\>][fd]|^\*deleting ]]; then
           operation=${line%% *}
           filename=$(sed "s:^\S*\s*::" <<< "$line" | sed 's:\d96:\\\`:g')
           if [[ ! "$operation" =~ \+\+\+\+$ ]]; then
-      # $REMOTE_RUNNER "cd $REMOTE_PATH ; if [ -f \"$filename\" ]; then cp --parents -p --reflink=auto \"$filename\" $DOT_DIR/backups/$TIMESTAMP; fi" < /dev/null
               echo "  B $filename" >&3
               echo "$filename" >&4
           fi
@@ -202,16 +184,12 @@ function push() {
 
   if [ -s "$TMP_DIR/push-delete" ]; then
       echo "$(<$TMP_DIR/push-delete) has been backup to $DOT_DIR/backups/$TIMESTAMP at remote"
-      # Plato Wu,2017/02/04: copy -C change the default path
-      tar -cf - "$TMP_DIR/push-delete" | $REMOTE_RUNNER "tar -C $REMOTE_PATH -xvf -"
-      $REMOTE_RUNNER "cd $REMOTE_PATH ; mkdir -p $DOT_DIR/backups/$TIMESTAMP ; xargs --arg-file=$TMP_DIR/push-delete cp --parents -p --reflink=auto  --target-directory=$DOT_DIR/backups/$TIMESTAMP"
-      # Plato Wu,2017/01/08: $() only works at local site
-      # $REMOTE_RUNNER  "cd $REMOTE_PATH ; find $DOT_DIR/backups/$TIMESTAMP  -maxdepth 0 -empty -exec rmdir $DOT_DIR/backups/$TIMESTAMP \;"
+      rclone copy "$TMP_DIR/push-delete" "$REMOTE:$DOT_DIR/backups/$TIMESTAMP"
   fi
 
   # Do not push back remotely deleted files
   cat "$TMP_DIR/remote-del" \
-  | rsync -auzxi --delete $RSYNC_OPTS --exclude "/$DOT_DIR" \
+  | rclone sync --delete $RSYNC_OPTS --exclude "/$DOT_DIR" \
       --exclude-from - $USER_RULES . $REMOTE/ \
   | sed "s/^/  | /" || die "PUSH"
 }
@@ -242,7 +220,7 @@ function sync {
   # snapshot is available locally
   if [[ -s "$STATE_DIR/tree-prev" ]]; then
     echo "  | Root dir: $REMOTE"
-    rsync --list-only --recursive --exclude "/$DOT_DIR" $USER_RULES $REMOTE/ \
+    rclone sync --dry-run --exclude "/$DOT_DIR" $USER_RULES $REMOTE/ \
       | grep "^-\|^d" \
       | sed -e "s:^\S*\s*\S*\s*\S*\s*\S*\s*:/:" -e "s:^/\.$::" \
       | sort > "$STATE_DIR/remote-tree-current" &
@@ -250,7 +228,7 @@ function sync {
   fi
 
   # Collect the current snapshot of the local tree
-  rsync --list-only --recursive --exclude "/$DOT_DIR" $USER_RULES . \
+  rclone sync --dry-run --exclude "/$DOT_DIR" $USER_RULES . \
       | grep "^-\|^d" \
       | sed -e "s:^\S*\s*\S*\s*\S*\s*\S*\s*:/:" -e "s:^/\.$::" \
       | sort > "$STATE_DIR/tree-current" \
@@ -408,7 +386,7 @@ function release_lock {
 }
 
 function acquire_remote_lock {
-  $REMOTE_RUNNER "mkdir -p \"$REMOTE_TMP_DIR\"; cd \"$REMOTE_PATH\" && mkdir \"$LOCK_DIR\" 2>/dev/null"
+  rclone mkdir "$REMOTE:$REMOTE_TMP_DIR/$LOCK_DIR" 2>/dev/null
 
   if [[ $? != 0 ]]; then
     echo "Couldn't acquire remote lock. Another client is syncing with $REMOTE or lock file couldn't be created. Exiting."
@@ -418,7 +396,7 @@ function acquire_remote_lock {
 }
 
 function release_remote_lock {
-  $REMOTE_RUNNER "cd \"$REMOTE_PATH\" && rmdir \"$LOCK_DIR\" &>/dev/null"
+  rclone rmdir "$REMOTE:$REMOTE_PATH/$LOCK_DIR" &>/dev/null
 }
 
 function assert_dotdir {
@@ -453,7 +431,7 @@ function die {
 # List all files in the sync set
 function list {
   echo -e "\x1b\x5b1;32mbitpocket\x1b\x5b0m will sync the following files:"
-  rsync -av --list-only --exclude "/$DOT_DIR"  $USER_RULES . | grep "^-\|^d" \
+  rclone sync --dry-run --exclude "/$DOT_DIR"  $USER_RULES . | grep "^-\|^d" \
       | sed "s:^\S*\s*\S*\s*\S*\s*\S*\s*:/:" | sed "s:^/\.::" | sort
 }
 
