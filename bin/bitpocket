@@ -32,16 +32,16 @@ if [ $? -ne 0 ]; then
 fi
 
 REMOTE="$REMOTE_HOST:$REMOTE_PATH"
-REMOTE_TMP_DIR="$REMOTE_PATH/$DOT_DIR/tmp"
+REMOTE_TMP_DIR="$DOT_DIR/tmp"
 
 # Don't sync user excluded files
 if [ -f "$DOT_DIR/exclude" ]; then
-  user_exclude="--exclude-from $DOT_DIR/exclude"
+  user_exclude="--exclude-from=$DOT_DIR/exclude"
 fi
 
 # Specify certain files to include
 if [ -f "$DOT_DIR/include" ]; then
-  user_include="--include-from $DOT_DIR/include"
+  user_include="--include-from=$DOT_DIR/include"
 fi
 
 # Specify rsync filter rules
@@ -108,9 +108,8 @@ function pull() {
   # Determine what will be fetched from server and make backup
   # copies of any local files to be deleted or overwritten.
   # Order of includes/excludes/filters is EXTREMELY important
-  cat "$TMP_DIR/local-add-del" \
-  | rclone sync --dry-run \
-        --delete-before --exclude "/$DOT_DIR" --exclude-from=- \
+  rclone sync --dry-run \
+        --delete-before --exclude "/$DOT_DIR" --exclude-from="$TMP_DIR/local-add-del" \
         $USER_RULES $REMOTE/ . \
   | while read line; do
     if [[ "$line" =~ ^[ch\<\>][fd]|^\*deleting ]]; then
@@ -165,9 +164,8 @@ function push() {
   exec 3>&1
   exec 4> >(sort > "$TMP_DIR/push-delete")
 
-  cat "$TMP_DIR/remote-del" \
-      | rclone sync --dry-run --delete $RSYNC_OPTS --exclude "/$DOT_DIR" \
-      --exclude-from - $USER_RULES . $REMOTE/ \
+  rclone sync --dry-run --delete-before $RSYNC_OPTS --exclude "/$DOT_DIR" \
+      --exclude-from="$TMP_DIR/remote-del" $USER_RULES . $REMOTE/ \
       | while read line; do
       if [[ "$line" =~ ^[ch\<\>][fd]|^\*deleting ]]; then
           operation=${line%% *}
@@ -188,9 +186,8 @@ function push() {
   fi
 
   # Do not push back remotely deleted files
-  cat "$TMP_DIR/remote-del" \
-  | rclone sync --delete $RSYNC_OPTS --exclude "/$DOT_DIR" \
-      --exclude-from - $USER_RULES . $REMOTE/ \
+  rclone sync --delete-before $RSYNC_OPTS --exclude "/$DOT_DIR" \
+      --exclude-from="$TMP_DIR/remote-del" $USER_RULES . $REMOTE/ \
   | sed "s/^/  | /" || die "PUSH"
 }
 
@@ -218,9 +215,10 @@ function sync {
 
   # Collect the current snapshot of the remote tree, if a previous tree
   # snapshot is available locally
+  #TODO fix grep/sed
   if [[ -s "$STATE_DIR/tree-prev" ]]; then
     echo "  | Root dir: $REMOTE"
-    rclone sync --dry-run --exclude "/$DOT_DIR" $USER_RULES $REMOTE/ \
+    rclone lsd --exclude "/$DOT_DIR" $USER_RULES $REMOTE/ \
       | grep "^-\|^d" \
       | sed -e "s:^\S*\s*\S*\s*\S*\s*\S*\s*:/:" -e "s:^/\.$::" \
       | sort > "$STATE_DIR/remote-tree-current" &
@@ -228,7 +226,8 @@ function sync {
   fi
 
   # Collect the current snapshot of the local tree
-  rclone sync --dry-run --exclude "/$DOT_DIR" $USER_RULES . \
+  #TODO: fix grep/sed
+  rclone lsd --exclude "/$DOT_DIR" $USER_RULES . \
       | grep "^-\|^d" \
       | sed -e "s:^\S*\s*\S*\s*\S*\s*\S*\s*:/:" -e "s:^/\.$::" \
       | sort > "$STATE_DIR/tree-current" \
@@ -386,7 +385,7 @@ function release_lock {
 }
 
 function acquire_remote_lock {
-  rclone mkdir "$REMOTE:$REMOTE_TMP_DIR/$LOCK_DIR" 2>/dev/null
+  rclone mkdir "$REMOTE/$REMOTE_TMP_DIR/$LOCK_DIR" 2>/dev/null
 
   if [[ $? != 0 ]]; then
     echo "Couldn't acquire remote lock. Another client is syncing with $REMOTE or lock file couldn't be created. Exiting."
@@ -396,7 +395,7 @@ function acquire_remote_lock {
 }
 
 function release_remote_lock {
-  rclone rmdir "$REMOTE:$REMOTE_PATH/$LOCK_DIR" &>/dev/null
+  rclone rmdir "$REMOTE/$LOCK_DIR" &>/dev/null
 }
 
 function assert_dotdir {
@@ -429,9 +428,10 @@ function die {
 }
 
 # List all files in the sync set
+#TODO modify grep
 function list {
   echo -e "\x1b\x5b1;32mbitpocket\x1b\x5b0m will sync the following files:"
-  rclone sync --dry-run --exclude "/$DOT_DIR"  $USER_RULES . | grep "^-\|^d" \
+  rclone lsd --exclude "/$DOT_DIR" $USER_RULES . | grep "^-\|^d" \
       | sed "s:^\S*\s*\S*\s*\S*\s*\S*\s*:/:" | sed "s:^/\.::" | sort
 }
 
